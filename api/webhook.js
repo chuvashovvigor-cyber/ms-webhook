@@ -1,3 +1,74 @@
+// Формат для Vercel Serverless Functions
+import axios from 'axios';
+
+// Конфигурация с вашими данными
+const MOYSKLAD_API_URL = 'https://api.moysklad.ru/api/remap/1.2';
+const MOYSKLAD_TOKEN = '125720136ed9aeb760288b76614c709f590a9ec4';
+const WAREHOUSE_IDS = {
+  MSK: '495124d9-e42f-11ed-0a80-0f480010433d', // Склад Мск одежда
+  SPB: '064ae98f-f40f-11e9-0a80-012300093c25'  // Склад Спб
+};
+
+// Создаем экземпляр axios с настройками
+const axiosInstance = axios.create({
+  baseURL: MOYSKLAD_API_URL,
+  headers: {
+    'Authorization': `Bearer ${MOYSKLAD_TOKEN}`,
+    'Accept-Encoding': 'gzip',
+    'Content-Type': 'application/json'
+  },
+  timeout: 30000
+});
+
+// Упрощенная функция проверки остатков
+async function checkStock(productId, warehouseId) {
+  try {
+    console.log(`🔍 Проверка остатков: товар ${productId}, склад ${warehouseId}`);
+    
+    // Прямой запрос остатков для конкретного товара на конкретном складе
+    const response = await axiosInstance.get(
+      `/report/stock/all?filter=store=${warehouseId};assortmentId=${productId}`
+    );
+    
+    if (response.data.rows && response.data.rows.length > 0) {
+      const stock = response.data.rows[0].stock || 0;
+      console.log(`✅ Найдено: ${stock} шт. для товара ${productId} на складе ${warehouseId}`);
+      return stock;
+    }
+    
+    console.log(`❌ Товар ${productId} не найден на складе ${warehouseId} или остаток = 0`);
+    return 0;
+    
+  } catch (error) {
+    console.error(`Ошибка при проверке остатков для ${productId}:`, error.message);
+    return 0;
+  }
+}
+
+// Функция для изменения склада в заказе
+async function changeOrderWarehouse(orderId, newWarehouseId) {
+  try {
+    console.log(`Изменение склада в заказе ${orderId} на ${newWarehouseId}`);
+    
+    const updateData = {
+      store: {
+        meta: {
+          href: `${MOYSKLAD_API_URL}/entity/store/${newWarehouseId}`,
+          type: 'store',
+          mediaType: 'application/json'
+        }
+      }
+    };
+
+    const response = await axiosInstance.put(`/entity/customerorder/${orderId}`, updateData);
+    console.log('✅ Склад успешно изменен:', response.data.name);
+    return response.data;
+  } catch (error) {
+    console.error('❌ Ошибка при изменении склада:', error.message);
+    throw error;
+  }
+}
+
 // Основной обработчик
 export default async function handler(req, res) {
   // Разрешаем только POST запросы
@@ -232,3 +303,9 @@ export default async function handler(req, res) {
     });
   }
 }
+
+export const config = {
+  api: {
+    bodyParser: true
+  }
+};
