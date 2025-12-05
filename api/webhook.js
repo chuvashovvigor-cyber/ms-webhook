@@ -20,20 +20,29 @@ const axiosInstance = axios.create({
   timeout: 30000
 });
 
-// Упрощенная функция проверки остатков
+// Функция для проверки остатков конкретного товара на складе
 async function checkStock(productId, warehouseId) {
   try {
     console.log(`🔍 Проверка остатков: товар ${productId}, склад ${warehouseId}`);
     
-    // Прямой запрос остатков для конкретного товара на конкретном складе
+    // Используем эндпоинт для получения остатков по складу
     const response = await axiosInstance.get(
-      `/report/stock/all?filter=store=${warehouseId};assortmentId=${productId}`
+      `/report/stock/bystore?store.id=${warehouseId}`
     );
     
+    // Ищем нужный товар среди всех остатков на складе
     if (response.data.rows && response.data.rows.length > 0) {
-      const stock = response.data.rows[0].stock || 0;
-      console.log(`✅ Найдено: ${stock} шт. для товара ${productId} на складе ${warehouseId}`);
-      return stock;
+      const stockItem = response.data.rows.find(item => {
+        // Проверяем разными способами на случай разной структуры данных
+        return item.assortmentId === productId || 
+               (item.assortment && item.assortment.id === productId);
+      });
+      
+      if (stockItem) {
+        const stock = stockItem.stock || 0;
+        console.log(`✅ Найдено остатков: ${stock} шт. для товара ${productId} на складе ${warehouseId}`);
+        return stock;
+      }
     }
     
     console.log(`❌ Товар ${productId} не найден на складе ${warehouseId} или остаток = 0`);
@@ -41,6 +50,9 @@ async function checkStock(productId, warehouseId) {
     
   } catch (error) {
     console.error(`Ошибка при проверке остатков для ${productId}:`, error.message);
+    if (error.response) {
+      console.error('Детали ошибки:', error.response.data);
+    }
     return 0;
   }
 }
