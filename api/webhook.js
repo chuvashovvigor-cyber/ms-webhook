@@ -1,73 +1,3 @@
-// Формат для Vercel Serverless Functions
-import axios from 'axios';
-
-// Конфигурация с вашими данными
-const MOYSKLAD_API_URL = 'https://api.moysklad.ru/api/remap/1.2';
-const MOYSKLAD_TOKEN = '125720136ed9aeb760288b76614c709f590a9ec4';
-const WAREHOUSE_IDS = {
-  MSK: '495124d9-e42f-11ed-0a80-0f480010433d', // Склад Мск одежда
-  SPB: '064ae98f-f40f-11e9-0a80-012300093c25'  // Склад Спб
-};
-
-const axiosInstance = axios.create({
-  baseURL: MOYSKLAD_API_URL,
-  headers: {
-    'Authorization': `Bearer ${MOYSKLAD_TOKEN}`,
-    'Accept-Encoding': 'gzip',
-    'Content-Type': 'application/json'
-  },
-  timeout: 30000
-});
-
-// Упрощенная функция проверки остатков
-async function checkStock(productId, warehouseId) {
-  try {
-    console.log(`🔍 Проверка остатков: товар ${productId}, склад ${warehouseId}`);
-    
-    // Прямой запрос остатков для конкретного товара на конкретном складе
-    const response = await axiosInstance.get(
-      `/report/stock/all?filter=store=${warehouseId};assortmentId=${productId}`
-    );
-    
-    if (response.data.rows && response.data.rows.length > 0) {
-      const stock = response.data.rows[0].stock || 0;
-      console.log(`✅ Найдено: ${stock} шт. для товара ${productId} на складе ${warehouseId}`);
-      return stock;
-    }
-    
-    console.log(`❌ Товар ${productId} не найден на складе ${warehouseId} или остаток = 0`);
-    return 0;
-    
-  } catch (error) {
-    console.error(`Ошибка при проверке остатков для ${productId}:`, error.message);
-    return 0;
-  }
-}
-
-// Функция для изменения склада в заказе
-async function changeOrderWarehouse(orderId, newWarehouseId) {
-  try {
-    console.log(`Изменение склада в заказе ${orderId} на ${newWarehouseId}`);
-    
-    const updateData = {
-      store: {
-        meta: {
-          href: `${MOYSKLAD_API_URL}/entity/store/${newWarehouseId}`,
-          type: 'store',
-          mediaType: 'application/json'
-        }
-      }
-    };
-
-    const response = await axiosInstance.put(`/entity/customerorder/${orderId}`, updateData);
-    console.log('✅ Склад успешно изменен:', response.data.name);
-    return response.data;
-  } catch (error) {
-    console.error('❌ Ошибка при изменении склада:', error.message);
-    throw error;
-  }
-}
-
 // Основной обработчик
 export default async function handler(req, res) {
   // Разрешаем только POST запросы
@@ -99,6 +29,7 @@ export default async function handler(req, res) {
     const order = orderResponse.data;
     
     console.log(`Заказ: ${order.name}`);
+    console.log(`Общее количество позиций: ${order.positions?.rows?.length || 0}`);
     
     // Получаем ID склада
     let currentWarehouseId = null;
@@ -137,34 +68,58 @@ export default async function handler(req, res) {
     let hasAnyProduct = false;
     
     if (order.positions && order.positions.rows) {
-      for (const position of order.positions.rows) {
+      console.log(`📋 Начинаем проверку ${order.positions.rows.length} позиций...`);
+      
+      for (let i = 0; i < order.positions.rows.length; i++) {
+        const position = order.positions.rows[i];
+        console.log(`\n--- Позиция ${i + 1} ---`);
+        console.log('Позиция целиком:', JSON.stringify(position, null, 2));
+        
         const assortment = position.assortment;
-        if (!assortment) continue;
+        if (!assortment) {
+          console.log('❌ Пропускаем: нет assortment');
+          continue;
+        }
         
         const productId = assortment.id;
+        if (!productId) {
+          console.log('❌ Пропускаем: нет assortment.id');
+          console.log('Assortment данные:', JSON.stringify(assortment, null, 2));
+          continue;
+        }
+        
         const productName = assortment.name || 'Неизвестный товар';
         const productType = assortment.meta?.type;
         const orderedQuantity = position.quantity;
         
-        // Пропускаем услуги
+        // Пропускаем услуги и комплекты
         if (productType === 'service' || productType === 'bundle') {
           console.log(`↪️ Пропускаем ${productType}: ${productName}`);
           continue;
         }
         
-        if (!productId) {
-          console.log(`↪️ Пропускаем позицию без ID товара: ${productName}`);
+        // Пропускаем позиции без цены или с нулевой ценой
+        if (!position.price || position.price === 0) {
+          console.log(`↪️ Пропускаем товар без цены: ${productName}`);
           continue;
         }
         
         hasAnyProduct = true;
-        console.log(`🔎 Проверяем товар: ${productName} (ID: ${productId}), Количество: ${orderedQuantity}`);
+        console.log(`🔎 Проверяем товар: ${productName}`);
+        console.log(`   ID: ${productId}`);
+        console.log(`   Тип: ${productType}`);
+        console.log(`   Заказано: ${orderedQuantity}`);
+        console.log(`   Цена: ${position.price}`);
         
         // Проверяем остатки на МСК
+        console.log(`   Проверяем остатки на МСК...`);
         const stockMSK = await checkStock(productId, WAREHOUSE_IDS.MSK);
         
         if (stockMSK < orderedQuantity) {
+          console.log(`   ❌ На МСК недостаточно: ${stockMSK} < ${orderedQuantity}`);
+          
           // Проверяем остатки на СПБ
+          console.log(`   Проверяем остатки на СПБ...`);
           const stockSPB = await checkStock(productId, WAREHOUSE_IDS.SPB);
           
           if (stockSPB >= orderedQuantity) {
@@ -177,23 +132,29 @@ export default async function handler(req, res) {
               stockSPB: stockSPB,
               reason: `На МСК: ${stockMSK} шт., на СПБ: ${stockSPB} шт.`
             });
-            console.log(`⚠️ ${productName}: недостаточно на МСК (${stockMSK}), но достаточно на СПБ (${stockSPB})`);
+            console.log(`   ✅ На СПБ достаточно: ${stockSPB} >= ${orderedQuantity}`);
           } else {
-            console.log(`❌ ${productName}: недостаточно на обоих складах (МСК: ${stockMSK}, СПБ: ${stockSPB})`);
+            console.log(`   ❌ На СПБ тоже недостаточно: ${stockSPB} < ${orderedQuantity}`);
           }
         } else {
-          console.log(`✅ ${productName}: достаточно на МСК (${stockMSK} >= ${orderedQuantity})`);
+          console.log(`   ✅ На МСК достаточно: ${stockMSK} >= ${orderedQuantity}`);
         }
       }
     }
     
     // Если не было товаров для проверки
     if (!hasAnyProduct) {
-      console.log(`📭 В заказе нет товаров для проверки (только услуги или позиции без ID)`);
+      console.log(`📭 В заказе нет товаров для проверки. Причины:`);
+      console.log(`   - Могут быть только услуги или комплекты`);
+      console.log(`   - Товары могут быть без assortment.id`);
+      console.log(`   - Могут быть товары с нулевой ценой`);
+      console.log(`   Проверьте логи выше для деталей по каждой позиции`);
+      
       return res.status(200).json({ 
         success: true,
         message: 'В заказе нет товаров для проверки',
-        order: order.name
+        order: order.name,
+        positionsCount: order.positions?.rows?.length || 0
       });
     }
     
@@ -271,9 +232,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
-export const config = {
-  api: {
-    bodyParser: true
-  }
-};
