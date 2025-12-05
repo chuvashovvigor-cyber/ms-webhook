@@ -19,24 +19,77 @@ const axiosInstance = axios.create({
   timeout: 10000
 });
 
-// Функция для проверки остатков
-async function checkStock(productId, warehouseId) {
+// Функция для проверки остатков - ИСПРАВЛЕННАЯ ВЕРСИЯ
+async function checkStock(productId, warehouseId, productType = 'variant') {
   try {
-    console.log(`Запрос остатков: товар=${productId}, склад=${warehouseId}`);
+    console.log(`Запрос остатков: товар=${productId}, склад=${warehouseId}, тип=${productType}`);
+    
+    // Строим полные ссылки для фильтра
+    const storeHref = `${MOYSKLAD_API_URL}/entity/store/${warehouseId}`;
+    
+    // Определяем тип сущности для товара
+    let assortmentType;
+    if (productType === 'variant') {
+      assortmentType = 'variant';
+    } else if (productType === 'product') {
+      assortmentType = 'product';
+    } else if (productType === 'service') {
+      assortmentType = 'service';
+    } else {
+      assortmentType = 'variant'; // по умолчанию
+    }
+    
+    const assortmentHref = `${MOYSKLAD_API_URL}/entity/${assortmentType}/${productId}`;
+    
+    // Формируем правильный фильтр с полными ссылками
+    const filter = `store=${encodeURIComponent(storeHref)};assortment=${encodeURIComponent(assortmentHref)}`;
+    
+    console.log(`Фильтр: ${filter}`);
     
     const response = await axiosInstance.get(
-      `/report/stock/bystore/current?filter=store.id=${warehouseId};assortment.id=${productId}`
+      `/report/stock/bystore?filter=${filter}`
     );
     
     console.log('Ответ по остаткам:', JSON.stringify(response.data, null, 2));
     
-    if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-      return response.data[0].stock || 0;
+    // Обрабатываем ответ
+    if (response.data && Array.isArray(response.data.rows) && response.data.rows.length > 0) {
+      const stock = response.data.rows[0].stock || 0;
+      console.log(`Найдено остатков: ${stock}`);
+      return stock;
     }
+    
+    console.log('Товар не найден в остатках');
     return 0;
+    
   } catch (error) {
     console.error('Ошибка при проверке остатков:', error.message);
     console.error('Детали ошибки:', error.response?.data || error.message);
+    
+    // Попробуем альтернативный метод через общий отчет
+    try {
+      console.log('Пробуем альтернативный метод запроса остатков...');
+      
+      // Альтернативный запрос - общий отчет с фильтрацией на клиенте
+      const altResponse = await axiosInstance.get(
+        `/report/stock/all?filter=assortmentId=${productId}`
+      );
+      
+      if (altResponse.data && Array.isArray(altResponse.data.rows)) {
+        // Ищем нужный склад
+        const warehouseStock = altResponse.data.rows.find(row => 
+          row.storeId === warehouseId || row.store?.id === warehouseId
+        );
+        
+        if (warehouseStock) {
+          console.log(`Альтернативный метод: остаток = ${warehouseStock.stock || 0}`);
+          return warehouseStock.stock || 0;
+        }
+      }
+    } catch (altError) {
+      console.error('Альтернативный метод тоже не сработал:', altError.message);
+    }
+    
     return 0;
   }
 }
@@ -93,7 +146,6 @@ export default async function handler(req, res) {
 
   try {
     console.log('=== НОВЫЙ ВЕБХУК ПОЛУЧЕН ===');
-    console.log('Тело запроса:', JSON.stringify(req.body, null, 2));
     
     // Проверяем наличие события
     if (!req.body.events || req.body.events.length === 0) {
@@ -180,16 +232,16 @@ export default async function handler(req, res) {
       }
       
       checkedPositions++;
-      console.log(`🔎 Проверяем товар: ${productName} (ID: ${productId}), Количество: ${orderedQuantity}`);
+      console.log(`🔎 Проверяем товар: ${productName} (ID: ${productId}, тип: ${productType}), Количество: ${orderedQuantity}`);
       
       // Получаем остаток на складе МСК
-      const stockMSK = await checkStock(productId, WAREHOUSE_IDS.MSK);
+      const stockMSK = await checkStock(productId, WAREHOUSE_IDS.MSK, productType);
       console.log(`📊 Остаток на МСК: ${stockMSK}`);
       
       // Если остатка недостаточно
       if (stockMSK < orderedQuantity) {
         // Проверяем наличие на складе СПБ
-        const stockSPB = await checkStock(productId, WAREHOUSE_IDS.SPB);
+        const stockSPB = await checkStock(productId, WAREHOUSE_IDS.SPB, productType);
         console.log(`📊 Остаток на СПБ: ${stockSPB}`);
         
         if (stockSPB >= orderedQuantity) {
