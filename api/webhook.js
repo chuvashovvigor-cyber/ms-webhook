@@ -69,6 +69,13 @@ async function changeOrderWarehouse(orderId, newWarehouseId) {
   }
 }
 
+// Вспомогательная функция для извлечения ID из ссылки
+function extractIdFromHref(href) {
+  if (!href) return null;
+  const parts = href.split('/');
+  return parts[parts.length - 1];
+}
+
 // Основной обработчик
 export default async function handler(req, res) {
   // Разрешаем только POST запросы
@@ -144,7 +151,6 @@ export default async function handler(req, res) {
       for (let i = 0; i < order.positions.rows.length; i++) {
         const position = order.positions.rows[i];
         console.log(`\n--- Позиция ${i + 1} ---`);
-        console.log('Позиция целиком:', JSON.stringify(position, null, 2));
         
         const assortment = position.assortment;
         if (!assortment) {
@@ -152,10 +158,15 @@ export default async function handler(req, res) {
           continue;
         }
         
-        const productId = assortment.id;
+        // Получаем ID товара разными способами
+        let productId = assortment.id;
+        if (!productId && assortment.meta && assortment.meta.href) {
+          productId = extractIdFromHref(assortment.meta.href);
+          console.log(`Извлечен ID из href: ${productId}`);
+        }
+        
         if (!productId) {
-          console.log('❌ Пропускаем: нет assortment.id');
-          console.log('Assortment данные:', JSON.stringify(assortment, null, 2));
+          console.log('❌ Пропускаем: не удалось получить ID товара');
           continue;
         }
         
