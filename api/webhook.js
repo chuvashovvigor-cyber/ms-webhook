@@ -9,12 +9,6 @@ const WAREHOUSE_IDS = {
   SPB: '064ae98f-f40f-11e9-0a80-012300093c25'  // Склад Спб
 };
 
-// Маппинг ID складов к их названиям для логов
-const WAREHOUSE_NAMES = {
-  [WAREHOUSE_IDS.MSK]: 'Склад МСК',
-  [WAREHOUSE_IDS.SPB]: 'Склад СПБ'
-};
-
 const axiosInstance = axios.create({
   baseURL: MOYSKLAD_API_URL,
   headers: {
@@ -28,9 +22,13 @@ const axiosInstance = axios.create({
 // Функция для проверки остатков
 async function checkStock(productId, warehouseId) {
   try {
+    console.log(`Запрос остатков: товар=${productId}, склад=${warehouseId}`);
+    
     const response = await axiosInstance.get(
       `/report/stock/bystore/current?filter=store.id=${warehouseId};assortment.id=${productId}`
     );
+    
+    console.log('Ответ по остаткам:', JSON.stringify(response.data, null, 2));
     
     if (response.data && Array.isArray(response.data) && response.data.length > 0) {
       return response.data[0].stock || 0;
@@ -38,6 +36,7 @@ async function checkStock(productId, warehouseId) {
     return 0;
   } catch (error) {
     console.error('Ошибка при проверке остатков:', error.message);
+    console.error('Детали ошибки:', error.response?.data || error.message);
     return 0;
   }
 }
@@ -45,6 +44,8 @@ async function checkStock(productId, warehouseId) {
 // Функция для изменения склада в заказе
 async function changeOrderWarehouse(orderId, newWarehouseId) {
   try {
+    console.log(`Изменение склада в заказе ${orderId} на ${newWarehouseId}`);
+    
     const updateData = {
       store: {
         meta: {
@@ -56,16 +57,31 @@ async function changeOrderWarehouse(orderId, newWarehouseId) {
     };
 
     const response = await axiosInstance.put(`/entity/customerorder/${orderId}`, updateData);
+    console.log('Склад успешно изменен:', response.data.name);
     return response.data;
   } catch (error) {
     console.error('Ошибка при изменении склада:', error.message);
+    console.error('Детали ошибки:', error.response?.data || error.message);
     throw error;
   }
 }
 
-// Функция для получения названия склада по ID
-function getWarehouseName(warehouseId) {
-  return WAREHOUSE_NAMES[warehouseId] || 'Неизвестный склад';
+// Функция для получения детальной информации о позициях заказа
+async function getOrderPositionsDetails(orderId) {
+  try {
+    console.log(`Получаем детали позиций для заказа ${orderId}`);
+    
+    // Получаем позиции заказа с расширенной информацией
+    const response = await axiosInstance.get(
+      `/entity/customerorder/${orderId}/positions?expand=assortment`
+    );
+    
+    console.log('Позиции заказа:', JSON.stringify(response.data.rows, null, 2));
+    return response.data.rows || [];
+  } catch (error) {
+    console.error('Ошибка при получении позиций:', error.message);
+    return [];
+  }
 }
 
 // Основной обработчик
@@ -77,6 +93,7 @@ export default async function handler(req, res) {
 
   try {
     console.log('=== НОВЫЙ ВЕБХУК ПОЛУЧЕН ===');
+    console.log('Тело запроса:', JSON.stringify(req.body, null, 2));
     
     // Проверяем наличие события
     if (!req.body.events || req.body.events.length === 0) {
@@ -95,19 +112,14 @@ export default async function handler(req, res) {
     
     // Получаем полные данные заказа
     console.log('Получаем детали заказа из МойСклад...');
-    const orderResponse = await axiosInstance.get(`/entity/customerorder/${orderId}?expand=positions`);
+    const orderResponse = await axiosInstance.get(`/entity/customerorder/${orderId}`);
     const order = orderResponse.data;
     
     console.log(`Заказ: ${order.name}`);
+    console.log(`Склад в заказе: ${JSON.stringify(order.store)}`);
     
     // Определяем текущий склад
     const currentWarehouseId = order.store?.id;
-    const currentWarehouseName = currentWarehouseId ? getWarehouseName(currentWarehouseId) : 'Склад не указан';
-    
-    console.log(`ID склада в заказе: ${currentWarehouseId || 'Не указан'}`);
-    console.log(`Склад: ${currentWarehouseName}`);
-    
-    // ВАЖНО: Если склад не указан, считаем что заказ на основном складе (МСК)
     const isOnMSK = !currentWarehouseId || currentWarehouseId === WAREHOUSE_IDS.MSK;
     const isOnSPB = currentWarehouseId === WAREHOUSE_IDS.SPB;
     
@@ -134,61 +146,107 @@ export default async function handler(req, res) {
     // Если дошли сюда - либо склад не указан, либо это МСК
     console.log(`🔍 Заказ ${!currentWarehouseId ? 'без склада' : 'на складе МСК'}, проверяем остатки...`);
     
+    // Получаем детализированные позиции заказа
+    const positions = await getOrderPositionsDetails(orderId);
+    
     // Проверяем остатки по всем позициям
     let needWarehouseChange = false;
+    let checkedPositions = 0;
     let reasons = [];
     
-    if (order.positions && order.positions.rows) {
-      console.log(`📦 Позиций в заказе: ${order.positions.rows.length}`);
-      
-      for (const position of order.positions.rows) {
-        const productId = position.assortment?.id;
-        const productName = position.assortment?.name || 'Неизвестный товар';
-        const orderedQuantity = position.quantity;
-        
-        if (!productId) {
-          console.log(`↪️ Пропускаем позицию без ID товара: ${productName}`);
-          continue;
-        }
-        
-        console.log(`🔎 Проверяем товар: ${productName}, Количество: ${orderedQuantity}`);
-        
-        // Получаем остаток на складе МСК
-        const stockMSK = await checkStock(productId, WAREHOUSE_IDS.MSK);
-        console.log(`📊 Остаток на МСК: ${stockMSK}`);
-        
-        // Если остатка недостаточно
-        if (stockMSK < orderedQuantity) {
-          // Проверяем наличие на складе СПБ
-          const stockSPB = await checkStock(productId, WAREHOUSE_IDS.SPB);
-          console.log(`📊 Остаток на СПБ: ${stockSPB}`);
-          
-          if (stockSPB >= orderedQuantity) {
-            needWarehouseChange = true;
-            reasons.push({
-              product: productName,
-              ordered: orderedQuantity,
-              stockMSK: stockMSK,
-              stockSPB: stockSPB,
-              reason: `Недостаточно на МСК (${stockMSK} < ${orderedQuantity}), но есть на СПБ (${stockSPB})`
-            });
-            console.log(`⚠️ Товар ${productName}: недостаточно на МСК, но достаточно на СПБ`);
-          } else {
-            console.log(`❌ Товар ${productName}: недостаточно на обоих складах`);
-            reasons.push({
-              product: productName,
-              ordered: orderedQuantity,
-              stockMSK: stockMSK,
-              stockSPB: stockSPB,
-              reason: `Недостаточно на обоих складах (МСК: ${stockMSK}, СПБ: ${stockSPB})`
-            });
-          }
-        } else {
-          console.log(`✅ Товар ${productName}: достаточно на МСК (${stockMSK} >= ${orderedQuantity})`);
-        }
+    console.log(`📦 Всего позиций для проверки: ${positions.length}`);
+    
+    for (const position of positions) {
+      const assortment = position.assortment;
+      if (!assortment) {
+        console.log(`↪️ Пропускаем позицию без товара`);
+        continue;
       }
-    } else {
-      console.log('📭 Нет позиций в заказе');
+      
+      const productId = assortment.id;
+      const productName = assortment.name || 'Неизвестный товар';
+      const productType = assortment.meta?.type; // product, variant, service, etc.
+      const orderedQuantity = position.quantity;
+      
+      // Пропускаем услуги (services) и другие не-товары
+      if (productType === 'service' || productType === 'bundle') {
+        console.log(`↪️ Пропускаем ${productType}: ${productName}`);
+        continue;
+      }
+      
+      if (!productId) {
+        console.log(`↪️ Пропускаем позицию без ID товара: ${productName}`);
+        continue;
+      }
+      
+      checkedPositions++;
+      console.log(`🔎 Проверяем товар: ${productName} (ID: ${productId}), Количество: ${orderedQuantity}`);
+      
+      // Получаем остаток на складе МСК
+      const stockMSK = await checkStock(productId, WAREHOUSE_IDS.MSK);
+      console.log(`📊 Остаток на МСК: ${stockMSK}`);
+      
+      // Если остатка недостаточно
+      if (stockMSK < orderedQuantity) {
+        // Проверяем наличие на складе СПБ
+        const stockSPB = await checkStock(productId, WAREHOUSE_IDS.SPB);
+        console.log(`📊 Остаток на СПБ: ${stockSPB}`);
+        
+        if (stockSPB >= orderedQuantity) {
+          needWarehouseChange = true;
+          reasons.push({
+            product: productName,
+            ordered: orderedQuantity,
+            stockMSK: stockMSK,
+            stockSPB: stockSPB,
+            reason: `Недостаточно на МСК (${stockMSK} < ${orderedQuantity}), но есть на СПБ (${stockSPB})`
+          });
+          console.log(`⚠️ Товар ${productName}: недостаточно на МСК, но достаточно на СПБ`);
+        } else {
+          console.log(`❌ Товар ${productName}: недостаточно на обоих складах`);
+          reasons.push({
+            product: productName,
+            ordered: orderedQuantity,
+            stockMSK: stockMSK,
+            stockSPB: stockSPB,
+            reason: `Недостаточно на обоих складах (МСК: ${stockMSK}, СПБ: ${stockSPB})`
+          });
+        }
+      } else {
+        console.log(`✅ Товар ${productName}: достаточно на МСК (${stockMSK} >= ${orderedQuantity})`);
+      }
+    }
+    
+    console.log(`✅ Проверено позиций: ${checkedPositions} из ${positions.length}`);
+    
+    // Если не было проверено ни одной позиции (все пропущены)
+    if (checkedPositions === 0) {
+      console.log(`⚠️ Не было проверено ни одной позиции. Устанавливаем склад по умолчанию: МСК`);
+      
+      try {
+        const updatedOrder = await changeOrderWarehouse(orderId, WAREHOUSE_IDS.MSK);
+        console.log(`✅ Склад установлен по умолчанию: МСК`);
+        
+        return res.status(200).json({ 
+          success: true,
+          message: 'Склад установлен по умолчанию: МСК',
+          order: updatedOrder.name,
+          orderId: updatedOrder.id,
+          warehouse: 'МСК',
+          note: 'Не было товаров для проверки остатков',
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        console.log(`⚠️ Не удалось установить склад: ${error.message}`);
+        return res.status(200).json({ 
+          success: true,
+          message: 'Заказ без проверяемых товаров',
+          order: order.name,
+          orderId: order.id,
+          note: 'Позиции заказа не содержат товаров с остатками',
+          timestamp: new Date().toISOString()
+        });
+      }
     }
     
     // Если нужно сменить склад
@@ -222,7 +280,7 @@ export default async function handler(req, res) {
     } else {
       console.log(`✅ Заказ не требует изменений. Все товары в наличии на МСК`);
       
-      // Если склад не был указан, но все есть на МСК - можно установить склад МСК
+      // Если склад не был указан, но все есть на МСК - устанавливаем склад МСК
       if (!currentWarehouseId) {
         console.log(`🔧 Заказ без склада, но товары есть на МСК. Устанавливаем склад МСК...`);
         try {
