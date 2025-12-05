@@ -51,7 +51,7 @@ async function changeOrderWarehouse(orderId, newWarehouseId) {
   }
 }
 
-// Функция для проверки остатков товара на складе (с правильным фильтром от поддержки)
+// Функция для проверки остатков товара на складе (с правильным фильтром)
 async function checkStockOnWarehouse(productId, productType, warehouseId) {
   try {
     console.log(`🔍 Проверка остатков: ${productId} (${productType}), склад ${warehouseId}`);
@@ -71,8 +71,8 @@ async function checkStockOnWarehouse(productId, productType, warehouseId) {
       filter = `variant=${MOYSKLAD_API_URL}/entity/variant/${productId}`;
     }
     
-    // Добавляем фильтр по складу
-    const fullFilter = `${filter};store.id=${warehouseId}`;
+    // Добавляем фильтр по складу (правильный синтаксис)
+    const fullFilter = `${filter};store=${MOYSKLAD_API_URL}/entity/store/${warehouseId}`;
     
     console.log(`Фильтр: ${fullFilter}`);
     
@@ -98,7 +98,61 @@ async function checkStockOnWarehouse(productId, productType, warehouseId) {
     if (error.response) {
       console.error('Статус:', error.response.status);
       console.error('Данные:', error.response.data);
+      
+      // Если ошибка 412, пробуем альтернативный подход
+      if (error.response.status === 412) {
+        console.log('⚠️ Пробуем альтернативный подход без фильтра по складу...');
+        return await checkStockAlternative(productId, productType, warehouseId);
+      }
     }
+    return 0;
+  }
+}
+
+// Альтернативная функция проверки остатков (без фильтра по складу в URL)
+async function checkStockAlternative(productId, productType, warehouseId) {
+  try {
+    console.log(`🔍 Альтернативная проверка для ${productId} (${productType})`);
+    
+    let filter = '';
+    
+    if (productType === 'variant') {
+      filter = `variant=${MOYSKLAD_API_URL}/entity/variant/${productId}`;
+    } else if (productType === 'product') {
+      filter = `product=${MOYSKLAD_API_URL}/entity/product/${productId}`;
+    } else {
+      filter = `variant=${MOYSKLAD_API_URL}/entity/variant/${productId}`;
+    }
+    
+    // Запрашиваем без фильтра по складу
+    const response = await axiosInstance.get(
+      `/report/stock/all?filter=${filter}`
+    );
+    
+    console.log(`Ответ получен, строк: ${response.data.rows?.length || 0}`);
+    
+    if (response.data.rows && response.data.rows.length > 0) {
+      // Ищем нужный склад среди всех
+      const stockItem = response.data.rows.find(row => {
+        // Проверяем разными способами
+        return (row.store && row.store.id === warehouseId) ||
+               (row.storeId === warehouseId) ||
+               (row.store && row.store.meta && row.store.meta.href && 
+                row.store.meta.href.includes(warehouseId));
+      });
+      
+      if (stockItem) {
+        const stock = stockItem.stock || 0;
+        console.log(`✅ Найдено остатков на складе ${warehouseId}: ${stock}`);
+        return stock;
+      }
+    }
+    
+    console.log(`❌ Товар не найден на складе ${warehouseId}`);
+    return 0;
+    
+  } catch (error) {
+    console.error(`Ошибка в альтернативной проверке для ${productId}:`, error.message);
     return 0;
   }
 }
