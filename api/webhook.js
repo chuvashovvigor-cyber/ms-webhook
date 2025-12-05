@@ -76,22 +76,38 @@ async function getAllStockForWarehouse(warehouseId) {
 // Функция для проверки остатков конкретного товара
 async function checkStock(productId, warehouseId) {
   try {
+    // Получаем информацию о товаре
+    const productInfo = await axiosInstance.get(`/entity/variant/${productId}`);
+    const productData = productInfo.data;
+    
+    // Получаем ID основного продукта
+    const mainProductId = productData.product?.meta?.href?.split('/').pop();
+    
+    console.log(`Основной продукт ID: ${mainProductId}`);
+    
     // Получаем все остатки на складе
     const warehouseStock = await getAllStockForWarehouse(warehouseId);
     
-    // Ищем конкретный товар
-    const stockItem = warehouseStock.find(item => {
-      return item.assortmentId === productId || 
-             (item.assortment && item.assortment.id === productId);
-    });
+    // Ищем по варианту (variant)
+    let stockItem = warehouseStock.find(item => 
+      item.assortmentId === productId || 
+      (item.assortment && item.assortment.id === productId)
+    );
+    
+    // Если не нашли, ищем по основному продукту
+    if (!stockItem && mainProductId) {
+      stockItem = warehouseStock.find(item => 
+        item.assortmentId === mainProductId || 
+        (item.assortment && item.assortment.id === mainProductId)
+      );
+    }
     
     if (stockItem) {
       const stock = stockItem.stock || 0;
-      console.log(`Товар ${productId} на складе ${warehouseId}: ${stock}`);
+      console.log(`Найдено остатков: ${stock}`);
       return stock;
     }
     
-    console.log(`Товар ${productId} не найден на складе ${warehouseId}`);
     return 0;
     
   } catch (error) {
