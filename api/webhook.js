@@ -51,6 +51,50 @@ async function changeOrderWarehouse(orderId, newWarehouseId) {
   }
 }
 
+// Функция для проверки остатков товара на складе МСК
+async function checkStockOnMSK(productId) {
+  try {
+    console.log(`🔍 Проверяем остатки товара ${productId} на МСК...`);
+    
+    // Получаем информацию о товаре
+    const productResponse = await axiosInstance.get(`/entity/variant/${productId}`);
+    const product = productResponse.data;
+    
+    // Получаем ID основного продукта (важно для вариантов)
+    const productHref = product.product?.meta?.href;
+    if (!productHref) {
+      console.log(`⚠️ У варианта ${productId} нет основного продукта, считаем что товара нет`);
+      return 0;
+    }
+    
+    const mainProductId = extractIdFromHref(productHref);
+    console.log(`Основной продукт ID: ${mainProductId}`);
+    
+    // Запрашиваем остатки для основного продукта
+    const stockResponse = await axiosInstance.get(`/report/stock/all?filter=assortmentId=${mainProductId}`);
+    
+    if (stockResponse.data.rows && stockResponse.data.rows.length > 0) {
+      // Ищем остатки на складе МСК
+      const mskStock = stockResponse.data.rows.find(row => {
+        return row.store && row.store.id === WAREHOUSE_IDS.MSK;
+      });
+      
+      if (mskStock) {
+        console.log(`✅ Товар найден на МСК, остаток: ${mskStock.stock}`);
+        return mskStock.stock || 0;
+      }
+    }
+    
+    console.log(`❌ Товар не найден на МСК`);
+    return 0;
+    
+  } catch (error) {
+    console.error(`Ошибка при проверке остатков на МСК для ${productId}:`, error.message);
+    // Если возникает ошибка, считаем что товара нет
+    return 0;
+  }
+}
+
 // Основной обработчик
 export default async function handler(req, res) {
   // Разрешаем только POST запросы
@@ -82,6 +126,7 @@ export default async function handler(req, res) {
     const order = orderResponse.data;
     
     console.log(`Заказ: ${order.name}`);
+    console.log(`Общее количество позиций: ${order.positions?.rows?.length || 0}`);
     
     // Получаем ID склада
     let currentWarehouseId = null;
@@ -123,8 +168,8 @@ export default async function handler(req, res) {
       }
     }
     
-    // ПРОВЕРЯЕМ ТОЛЬКО ЭТО: если есть товар на МСК - оставляем, если нет - меняем на СПБ
-    console.log(`🔍 Проверяем, есть ли товары на МСК...`);
+    // ПРОВЕРЯЕМ ОСТАТКИ НА МСК
+    console.log(`🔍 Проверяем остатки товаров на МСК...`);
     
     let hasMissingProducts = false;
     let foundAnyProduct = false;
@@ -144,21 +189,29 @@ export default async function handler(req, res) {
         
         if (!productId) continue;
         
+        const productName = assortment.name || 'Неизвестный товар';
         const productType = assortment.meta?.type;
+        const orderedQuantity = position.quantity;
         
         // Пропускаем услуги
         if (productType === 'service' || productType === 'bundle') {
+          console.log(`↪️ Пропускаем ${productType}: ${productName}`);
           continue;
         }
         
         foundAnyProduct = true;
+        console.log(`🔎 Проверяем товар: ${productName} (ID: ${productId}), Количество: ${orderedQuantity}`);
         
-        // ПРОВЕРКА: есть ли товар на МСК?
-        // Простая логика: если это товар (не услуга), считаем что его нет на МСК
-        // (потому что в предыдущих проверках мы видели что товар не находится)
-        hasMissingProducts = true;
-        console.log(`❌ Товар не найден на МСК, меняем склад на СПБ`);
-        break; // Достаточно одного товара
+        // Проверяем остатки на МСК
+        const stockOnMSK = await checkStockOnMSK(productId);
+        
+        if (stockOnMSK < orderedQuantity) {
+          console.log(`❌ На МСК недостаточно: ${stockOnMSK} < ${orderedQuantity}`);
+          hasMissingProducts = true;
+          break; // Достаточно одного товара, которого нет в наличии
+        } else {
+          console.log(`✅ На МСК достаточно: ${stockOnMSK} >= ${orderedQuantity}`);
+        }
       }
     }
     
