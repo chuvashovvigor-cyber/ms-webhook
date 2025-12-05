@@ -16,39 +16,71 @@ const axiosInstance = axios.create({
     'Accept-Encoding': 'gzip',
     'Content-Type': 'application/json'
   },
-  timeout: 10000
+  timeout: 30000  // Увеличиваем таймаут для запросов
 });
 
-// Функция для проверки остатков - ИСПРАВЛЕННАЯ ВЕРСИЯ 2
+// Функция для проверки остатков - РАБОЧАЯ ВЕРСИЯ
 async function checkStock(productId, warehouseId) {
   try {
-    console.log(`Запрос остатков: товар=${productId}, склад=${warehouseId}`);
+    console.log(`Запрос остатков для товара ${productId} на всех складах`);
     
-    // Используем правильный endpoint
+    // Запрашиваем остатки товара на ВСЕХ складах
     const response = await axiosInstance.get(
-      `/report/stock/bystore/current?filter=store.id=${warehouseId}`
+      `/report/stock/all?filter=assortmentId=${productId}`
     );
     
-    console.log(`Получено позиций в остатках: ${response.data.length}`);
+    console.log(`Получено записей об остатках: ${response.data.rows ? response.data.rows.length : 0}`);
     
-    // Ищем наш товар в полученных остатках
-    const foundStock = response.data.find(item => {
-      return item.assortmentId === productId || 
-             (item.assortment && item.assortment.id === productId);
-    });
-    
-    if (foundStock) {
-      const stock = foundStock.stock || 0;
-      console.log(`Найдено остатков: ${stock}`);
-      return stock;
+    if (response.data && response.data.rows) {
+      // Ищем запись для нужного склада
+      const warehouseStock = response.data.rows.find(item => {
+        // Проверяем разными способами
+        return item.storeId === warehouseId || 
+               (item.store && item.store.id === warehouseId) ||
+               (item.store && item.store.meta && item.store.meta.href && 
+                item.store.meta.href.includes(warehouseId));
+      });
+      
+      if (warehouseStock) {
+        const stock = warehouseStock.stock || 0;
+        console.log(`Найдено остатков на складе ${warehouseId}: ${stock}`);
+        return stock;
+      }
     }
     
-    console.log('Товар не найден в остатках этого склада');
+    console.log(`Товар не найден в остатках склада ${warehouseId}`);
     return 0;
     
   } catch (error) {
     console.error('Ошибка при проверке остатков:', error.message);
     console.error('Детали ошибки:', error.response?.data || error.message);
+    
+    // Альтернативный метод через обычный продукт
+    try {
+      console.log('Пробуем альтернативный метод...');
+      
+      // Просим все остатки по складу и ищем вручную
+      const allStockResponse = await axiosInstance.get(
+        `/report/stock/all?limit=1000`
+      );
+      
+      if (allStockResponse.data && allStockResponse.data.rows) {
+        const found = allStockResponse.data.rows.find(item => 
+          (item.assortmentId === productId || 
+           (item.assortment && item.assortment.id === productId)) &&
+          (item.storeId === warehouseId || 
+           (item.store && item.store.id === warehouseId))
+        );
+        
+        if (found) {
+          console.log(`Альтернативный метод: остаток = ${found.stock || 0}`);
+          return found.stock || 0;
+        }
+      }
+    } catch (altError) {
+      console.error('Альтернативный метод тоже не сработал:', altError.message);
+    }
+    
     return 0;
   }
 }
@@ -69,10 +101,10 @@ async function changeOrderWarehouse(orderId, newWarehouseId) {
     };
 
     const response = await axiosInstance.put(`/entity/customerorder/${orderId}`, updateData);
-    console.log('Склад успешно изменен:', response.data.name);
+    console.log('✅ Склад успешно изменен:', response.data.name);
     return response.data;
   } catch (error) {
-    console.error('Ошибка при изменении склада:', error.message);
+    console.error('❌ Ошибка при изменении склада:', error.message);
     console.error('Детали ошибки:', error.response?.data || error.message);
     throw error;
   }
@@ -128,9 +160,11 @@ export default async function handler(req, res) {
     
     console.log(`Заказ: ${order.name}`);
     
-    // Получаем ID склада из meta.href (правильный способ)
-    const storeHref = order.store?.meta?.href;
-    const currentWarehouseId = storeHref ? storeHref.split('/').pop() : null;
+    // Правильно получаем ID склада
+    let currentWarehouseId = null;
+    if (order.store && order.store.meta && order.store.meta.href) {
+      currentWarehouseId = order.store.meta.href.split('/').pop();
+    }
     
     console.log(`ID склада в заказе: ${currentWarehouseId || 'Не указан'}`);
     
@@ -249,7 +283,7 @@ export default async function handler(req, res) {
     
     // Если нужно сменить склад
     if (needWarehouseChange) {
-      console.log(`🔄 Меняем склад на СПБ`);
+      console.log(`🔄 Меняем склад на СПБ. Причины:`, reasons);
       
       try {
         const updatedOrder = await changeOrderWarehouse(orderId, WAREHOUSE_IDS.SPB);
